@@ -1,0 +1,13 @@
+version: "3.5"
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    command: python main.py
+    environment:
+      TOKEN: ${TOKEN}
+      URL: ${URL}
+      LOGIN: ${LOGIN}
+      PASSWORD: ${PASSWORD}
