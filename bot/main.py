@@ -20,9 +20,11 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 auth = aiohttp.BasicAuth(login=config.LOGIN, password=config.PASSWORD, encoding='UTF8')
 
 
-class DataInput(StatesGroup):
-    textInput = State()
-    numInput = State()
+class UserInput(StatesGroup):
+    searchText = State()
+    orderNumber = State()
+    userEmail = State()
+    verificationCode = State()
 
 
 @dp.message_handler(commands='find')
@@ -32,82 +34,137 @@ async def cmd_find(message: types.Message):
                  types.InlineKeyboardButton('По артикулу', callback_data='code'))
     keyboard.add(types.InlineKeyboardButton('По штрихкоду', callback_data='barcode'),
                  types.InlineKeyboardButton('По ISBN', callback_data='isbn'))
-    await message.answer("Выберите способ поиска:", reply_markup=keyboard)
+    await message.answer('Выберите способ поиска:', reply_markup=keyboard)
 
 
 @dp.callback_query_handler(lambda c: c.data)
 async def process_callback(callback_query: types.CallbackQuery):
-    method = callback_query.data
+    command = callback_query.data
     await bot.answer_callback_query(callback_query.id)
-    if method == 'name':
+    if command == 'name':
         answer = 'Введите наименование товара'
-    elif method == 'code':
+    elif command == 'code':
         answer = 'Введите артикул товара'
-    elif method == 'barcode':
+    elif command == 'barcode':
         answer = 'Введите штрихкод товара'
-    elif method == 'isbn':
+    elif command == 'isbn':
         answer = 'Введите ISBN'
     else:
         return
     await bot.send_message(callback_query.from_user.id, answer)
-    await set_method(method)
-    await DataInput.textInput.set()
+    await set_variable(command)
+    await UserInput.searchText.set()
+
+
+@dp.message_handler(state=UserInput.searchText, content_types=types.ContentTypes.TEXT)
+async def search_text_input(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    command = data['var']
+    await state.finish()
+    await send_request(message, command, data=message.text)
 
 
 @dp.message_handler(commands='status')
 async def cmd_status(message: types.Message):
-    await set_method('status')
-    arg = message.get_args()
-    if not arg or not arg.isdecimal():
+    order_number = message.get_args()
+    if not order_number or not order_number.isdecimal():
         await message.answer('Введите номер заказа')
-        await DataInput.numInput.set()
+        await UserInput.orderNumber.set()
     else:
-        await show_response(message, arg)
+        await send_request(message, 'status', data=order_number)
 
 
-@dp.message_handler(state=DataInput.textInput, content_types=types.ContentTypes.TEXT)
-async def process_user_input(message: types.Message, state: FSMContext):
-    arg = message.text
-    await show_response(message, arg)
+@dp.message_handler(state=UserInput.orderNumber, content_types=types.ContentTypes.TEXT)
+async def order_number_input(message: types.Message, state: FSMContext):
+    order_number = message.text
+    await state.finish()
+    if order_number.isdecimal():
+        await send_request(message, 'status', data=order_number)
+    else:
+        await message.answer('Некорректный номер заказа')
 
 
-@dp.message_handler(state=DataInput.numInput, content_types=types.ContentTypes.TEXT)
-async def process_user_input(message: types.Message, state: FSMContext):
-    arg = message.text
-    if not arg.isdecimal():
-        await message.answer('Пожалуйста укажите корректный номер заказа')
+@dp.message_handler(commands='register')
+async def cmd_register(message: types.Message):
+    user_email = message.get_args()
+    if not user_email:
+        await message.answer('Введите email')
+        await UserInput.userEmail.set()
+    else:
+        await verification_request(message, user_email)
+
+
+@dp.message_handler(state=UserInput.userEmail, content_types=types.ContentTypes.TEXT)
+async def email_input(message: types.Message, state: FSMContext):
+    await state.finish()
+    await verification_request(message, message.text)
+
+
+async def verification_request(message, user_email):
+    params = await send_request(message, 'register', email=user_email)
+    if not params:
         return
-    await show_response(message, arg)
+    await set_variable(params)
+    await UserInput.verificationCode.set()
+
+
+@dp.message_handler(state=UserInput.verificationCode, content_types=types.ContentTypes.TEXT)
+async def verification_code_input(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    params = data['var']
+    await state.finish()
+    if params['code'] == message.text:
+        await send_request(message, 'confirm', guid=params['guid'])
+    else:
+        await message.answer('Неверный код')
+
+
+@dp.message_handler(commands='debts')
+async def cmd_debts(message: types.Message):
+    await send_request(message, 'debts')
+
+
+async def send_request(message, command, **kwargs):
+    await message.answer('Пожалуйста, подождите, я обрабатываю Ваш запрос...')
+    request = {'user': str(message.from_user.id), 'command': command}
+    for key, value in kwargs.items():
+        request[key] = value
+    async with aiohttp.ClientSession(auth=auth) as session:
+        try:
+            async with session.get(config.URL, json=request) as response:
+                data = await response.json()
+                if data:
+                    # Выводим сообщение
+                    msg = data.setdefault('message')
+                    if msg:
+                        await message.answer(msg, parse_mode=ParseMode.MARKDOWN)
+                    # Получаем параметры
+                    params = data.setdefault('params')
+                    if params:
+                        # Если в параметрах есть свои сообщения то выводим и их
+                        msgs = params.setdefault('messages')
+                        if msgs:
+                            for msg in msgs:
+                                await message.answer(msg, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            await message.answer('Упс... Что-то пошло не так')
+        finally:
+            await session.close()
+    return params
 
 
 @dp.message_handler(content_types=ContentTypes.ANY)
 async def echo_message(message: types.Message):
     help_text = 'Вы можете управлять мной, отправляя эти команды:' \
                 '\n' \
+                '\n*Общие команды*' \
                 '\n/find - Уточнить цены и остатки товаров' \
-                '\n/status - Узнать статус заказа'
+                '\n/status - Узнать статус заказа' \
+                '\n' \
+                '\n*Для оптовых клиентов*' \
+                '\n/register - Зарегистрироваться в системе' \
+                '\n/debts - Получить данные по задолженностям'
     await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
-
-
-async def show_response(message, arg):
-    state = Dispatcher.get_current().current_state()
-    user_data = await state.get_data()
-    method = user_data['method']
-    await state.finish()
-
-    await message.answer('Пожалуйста, подождите, я обрабатываю Ваш запрос...')
-    async with aiohttp.ClientSession(auth=auth) as session:
-        try:
-            async with session.get(config.URL + '/' + method + '/' + arg) as response:
-                if response.status == 200:
-                    msg = await response.text()
-                    await message.answer(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
-                else:
-                    await message.answer('Извините, в настоящее время сервис недоступен (error ' + str(response.status) + ')')
-        except Exception:
-            await message.answer('Упс... Что-то пошло не так')
-        finally:
-            await session.close()
 
 
 async def on_startup(dispatcher: Dispatcher):
@@ -116,6 +173,8 @@ async def on_startup(dispatcher: Dispatcher):
         BotCommand('/help', 'Показать список всех доступных команд'),
         BotCommand('/find', 'Уточнить цены и остатки товаров'),
         BotCommand('/status', 'Узнать статус заказа'),
+        BotCommand('/register', 'Зарегистрироваться'),
+        BotCommand('/debts', 'Получить данные по задолженностям'),
     ]
     await dispatcher.bot.set_my_commands(commands)
 
@@ -125,9 +184,9 @@ async def on_shutdown(dispatcher: Dispatcher):
     await dispatcher.storage.wait_closed()
 
 
-async def set_method(method):
+async def set_variable(var):
     state = Dispatcher.get_current().current_state()
-    await state.update_data(method=method)
+    await state.update_data(var=var)
 
 
 if __name__ == '__main__':
