@@ -27,6 +27,7 @@ class UserInput(StatesGroup):
     verificationCode = State()
 
 
+# /find - Поиск товара
 @dp.message_handler(commands='find')
 async def cmd_find(message: types.Message):
     keyboard = types.InlineKeyboardMarkup(row_width=2)
@@ -64,6 +65,14 @@ async def search_text_input(message: types.Message, state: FSMContext):
     await send_request(message, command, data=message.text)
 
 
+# /orders - Получение списка заказов
+@dp.message_handler(commands='orders')
+async def cmd_orders(message: types.Message):
+    amount = message.get_args()
+    await send_request(message, 'orders', data=amount if amount and amount.isdecimal() else [])
+
+
+# /status - Получение статуса заказа
 @dp.message_handler(commands='status')
 async def cmd_status(message: types.Message):
     order_number = message.get_args()
@@ -84,6 +93,7 @@ async def order_number_input(message: types.Message, state: FSMContext):
         await message.answer('Некорректный номер заказа')
 
 
+# /register - Регистрация в 1С
 @dp.message_handler(commands='register')
 async def cmd_register(message: types.Message):
     user_email = message.get_args()
@@ -119,13 +129,28 @@ async def verification_code_input(message: types.Message, state: FSMContext):
         await message.answer('Неверный код')
 
 
+# /debts - Получение задолженностей
 @dp.message_handler(commands='debts')
 async def cmd_debts(message: types.Message):
     await send_request(message, 'debts')
 
 
+# Все остальные обращения будут показывать справку
+@dp.message_handler(content_types=ContentTypes.ANY)
+async def echo_message(message: types.Message):
+    help_text = 'Вы можете управлять мной, отправляя эти команды:' \
+                '\n' \
+                '\n/register - Зарегистрироваться в системе' \
+                '\n/find - Найти товар' \
+                '\n/orders - Показать список заказов' \
+                '\n/status - Узнать статус заказа' \
+                '\n/debts - Показать задолженности'
+    await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
+
+
 async def send_request(message, command, **kwargs):
     await message.answer('Пожалуйста, подождите, я обрабатываю Ваш запрос...')
+    params = None
     request = {'user': str(message.from_user.id), 'command': command}
     for key, value in kwargs.items():
         request[key] = value
@@ -153,28 +178,20 @@ async def send_request(message, command, **kwargs):
     return params
 
 
-@dp.message_handler(content_types=ContentTypes.ANY)
-async def echo_message(message: types.Message):
-    help_text = 'Вы можете управлять мной, отправляя эти команды:' \
-                '\n' \
-                '\n*Общие команды*' \
-                '\n/find - Уточнить цены и остатки товаров' \
-                '\n/status - Узнать статус заказа' \
-                '\n' \
-                '\n*Для оптовых клиентов*' \
-                '\n/register - Зарегистрироваться в системе' \
-                '\n/debts - Получить данные по задолженностям'
-    await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
+async def set_variable(var):
+    state = Dispatcher.get_current().current_state()
+    await state.update_data(var=var)
 
 
 async def on_startup(dispatcher: Dispatcher):
     # Регистрация команд, отображаемых в интерфейсе бота
     commands = [
         BotCommand('/help', 'Показать список всех доступных команд'),
-        BotCommand('/find', 'Уточнить цены и остатки товаров'),
-        BotCommand('/status', 'Узнать статус заказа'),
         BotCommand('/register', 'Зарегистрироваться'),
-        BotCommand('/debts', 'Получить данные по задолженностям'),
+        BotCommand('/find', 'Найти товар'),
+        BotCommand('/orders', 'Показать список заказов'),
+        BotCommand('/status', 'Узнать статус заказа'),
+        BotCommand('/debts', 'Показать задолженности'),
     ]
     await dispatcher.bot.set_my_commands(commands)
 
@@ -182,11 +199,6 @@ async def on_startup(dispatcher: Dispatcher):
 async def on_shutdown(dispatcher: Dispatcher):
     await dispatcher.storage.close()
     await dispatcher.storage.wait_closed()
-
-
-async def set_variable(var):
-    state = Dispatcher.get_current().current_state()
-    await state.update_data(var=var)
 
 
 if __name__ == '__main__':
